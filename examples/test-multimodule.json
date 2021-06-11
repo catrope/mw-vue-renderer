@@ -1,0 +1,23 @@
+{
+	"modules": {
+		"main": {
+			"files": {
+				"App.vue": "const { WvuiButton } = require( 'wvui' ); module.exports = {components: { WvuiButton }, data: () => ({ count: 0 }), props: {label: {type: String, default:'Hello'}}, template: `<div>{{label}} {{count}} <wvui-button action='progressive' @click='count++'>+</wvui-button> <wvui-button action='destructive' @click='count--'>-</wvui-button></div>`};"
+			},
+			"entry": "App.vue"
+		},
+		"wvui": {
+			"files": {
+				"Button.vue": "module.exports = {name: 'WvuiButton', props:{ action:{ type: String, default: 'default' }, type:{ type:String, default:'normal' } }, computed:{ rootClasses() { return { 'wvui-button--action-default': this.action === 'default', 'wvui-button--action-progressive': this.action === 'progressive', 'wvui-button--action-destructive': this.action === 'destructive', 'wvui-button--type-primary': this.type === 'primary', 'wvui-button--type-normal': this.type === 'normal', 'wvui-button--type-quiet': this.type === 'quiet', 'wvui-button--framed': this.type !== 'quiet' }; } }, methods: { onClick( event ) { this.$emit( 'click', event ); } }, template: `<button class='wvui-button' :class='rootClasses' @click='onClick'><slot /></button>`};",
+				"index.js": "module.exports = { WvuiButton: require( './Button.vue' ) };"
+			},
+			"entry": "index.js"
+		}
+	},
+	"props": {
+		"label": "Hi there"
+	},
+	"attrs": {
+		"id": "mw-foo"
+	}
+}

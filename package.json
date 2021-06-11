@@ -1,0 +1,26 @@
+{
+	"name": "mw-vue-renderer",
+	"description": "Proof of concept Vue SSR service",
+	"version": "0.0.0",
+	"main": "dist/server.js",
+	"scripts": {
+		"start": "npm run build && node dist/server.js",
+		"build": "tsc",
+		"test": "npm run linter:js",
+		"linter:js": "eslint --cache --max-warnings 0 --ext .js,.json,.ts"
+	},
+	"dependencies": {
+		"express": "^4.17.1",
+		"vue": "^2.6.14",
+		"vue-server-renderer": "^2.6.14"
+	},
+	"devDependencies": {
+		"@types/express": "^4.17.12",
+		"@typescript-eslint/eslint-plugin": "^4.26.1",
+		"@typescript-eslint/parser": "^4.26.1",
+		"eslint": "^7.28.0",
+		"eslint-config-wikimedia": "^0.20.0",
+		"typescript": "^4.3.2",
+		"vue-template-compiler": "^2.6.14"
+	}
+}

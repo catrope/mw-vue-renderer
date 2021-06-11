@@ -1,0 +1,28 @@
+{
+	"root": true,
+	"extends": [
+		"wikimedia/server",
+		"plugin:@typescript-eslint/recommended"
+	],
+	"parser": "@typescript-eslint/parser",
+	"parserOptions": {
+		"parser": "@typescript-eslint/parser"
+	},
+	"plugins": [ "@typescript-eslint" ],
+	"rules": {
+		"jsdoc/require-param-type": "off",
+		"jsdoc/require-returns-type": "off",
+		"@typescript-eslint/explicit-function-return-type": [
+			"warn",
+			{
+				"allowExpressions": true
+			}
+		]
+	},
+	"settings": {
+		"jsdoc": {
+			"mode": "typescript"
+		}
+	}
+
+}
