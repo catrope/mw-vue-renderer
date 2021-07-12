@@ -140,7 +140,7 @@ function wrapComponent(
 	} );
 }
 
-server.use( express.json() );
+server.use( express.json( { limit: '10MB' } ) );
 
 server.post( '/render', async ( req, res ) => {
 	const { modules, mainModule = 'main', props = {}, attrs = {} } = ( req.body as RequestData );
