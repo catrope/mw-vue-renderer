@@ -28,6 +28,10 @@ type ModuleExecutionContext = {
 	modules: Record<string, ModuleDefinition>
 }
 
+const builtinModules = {
+	vue: Vue
+};
+
 // resolveRelativePath was copied from resources/src/startup/mediawiki.js
 
 /**
@@ -101,7 +105,9 @@ function makeRequireFunction( context : ModuleExecutionContext, path : string ) 
 	return function ( fileName : string ) : unknown {
 		const resolvedFileName = resolveRelativePath( fileName, path );
 		if ( resolvedFileName === null ) {
-			// TODO provide built-in modules, we'll probably want wvui
+			if ( fileName in builtinModules ) {
+				return builtinModules[ fileName ];
+			}
 			if ( hasOwn.call( context.modules, fileName ) ) {
 				// eslint-disable-next-line no-use-before-define
 				return executeModule( context.modules, fileName );
