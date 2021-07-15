@@ -1,36 +1,85 @@
-import Vue from 'vue';
+import Vue, { ComponentOptions, VueConstructor, VNodeDirective, VNode } from 'vue';
 import express from 'express';
 import { parseComponent, SFCDescriptor } from 'vue-template-compiler';
 import { createRenderer } from 'vue-server-renderer';
-import { ComponentOptions } from 'vue';
-
-const server = express();
-const renderer = createRenderer();
-const hasOwn = Object.prototype.hasOwnProperty;
+import makeMwI18n, { MwI18n, MwMessage } from './mwMessage';
 
 type ModuleDefinition = {
-	files: Record<string, string|Record<string, unknown>>,
-	entry: string
+	files: Record<string, string | Record<string, unknown>>,
+	entry: string,
+	messages?: string | Record<string, string>,
+	dependencies?: string[]
 }
 
 type RequestData = {
 	modules: Record<string, ModuleDefinition>,
+	lang: string,
 	mainModule?: string,
+	exportProperty?: string,
 	props: Record<string, unknown>,
 	attrs: Record<string, unknown>
 }
 
-type ModuleExport = ComponentOptions<never> | Record<string, unknown>
+type ModuleExport = ComponentOptions<never> | VueConstructor | Record<string, unknown>;
+
+type RequestExecutionContext = {
+	modules: Record<string, ModuleDefinition>,
+	moduleExportsCache: Record<string, ModuleExport>,
+	messageMap: Map<string, string>,
+	mockWindow: Record<string, unknown>
+}
 
 type ModuleExecutionContext = {
 	files: Record<string, string|Record<string, unknown>>,
-	exportsCache: Record<string, ModuleExport>,
-	modules: Record<string, ModuleDefinition>
+	fileExportsCache: Record<string, ModuleExport>,
+	requestContext: RequestExecutionContext
 }
 
 const builtinModules = {
 	vue: Vue
 };
+
+Vue.use( {
+	install( localVue ) {
+		localVue.prototype.$i18n = function ( key, ...parameters ) {
+			// The _mw option is attached in wrapComponent()
+			// eslint-disable-next-line no-underscore-dangle
+			return this.$root.$options._mw.message( key, ...parameters );
+		};
+	}
+} );
+
+function i18nDirective( vnode : VNode, binding : VNodeDirective ) : void {
+	// eslint-disable-next-line no-underscore-dangle
+	const mw = ( vnode.context.$root as Vue & { $options: { _mw: MwI18n } } )
+		.$options._mw;
+	let message : MwMessage;
+	if ( Array.isArray( binding.value ) ) {
+		if ( binding.arg === undefined ) {
+			// v-i18n-html="[ ...params ]" (error)
+			throw new Error( 'v-i18n-html used with parameter array but without message key' );
+		}
+		// v-i18n-html:messageKey="[ ...params ]"
+		message = mw.message( binding.arg ).params( binding.value );
+	} else if ( binding.value instanceof mw.Message ) {
+		// v-i18n-html="mw.message( '...' ).params( [ ... ] )"
+		message = binding.value;
+	} else {
+		// v-i18n-html:foo or v-i18n-html="'foo'"
+		message = mw.message( binding.arg || binding.value );
+	}
+	vnode.data.domProps = {
+		innerHTML: message.parse()
+	};
+}
+
+const server = express();
+const renderer = createRenderer( {
+	directives: {
+		'i18n-html': i18nDirective
+	}
+} );
+const hasOwn = Object.prototype.hasOwnProperty;
 
 // resolveRelativePath was copied from resources/src/startup/mediawiki.js
 
@@ -77,7 +126,7 @@ function executeFile( context : ModuleExecutionContext, path : string ) : Module
 	let code = context.files[ path ];
 	let result : ModuleExport;
 	if ( typeof code === 'string' ) {
-		let parsedSFC : SFCDescriptor|null = null;
+		let parsedSFC : SFCDescriptor = null;
 		// Allow .vue files that have already been transformed to JS
 		if ( path.endsWith( '.vue' ) && code.trim().startsWith( '<' ) ) {
 			parsedSFC = parseComponent( code );
@@ -85,10 +134,13 @@ function executeFile( context : ModuleExecutionContext, path : string ) : Module
 		}
 
 		const moduleObj = { exports: {} };
+		const mockWindow = context.requestContext.mockWindow;
 		// eslint-disable-next-line no-new-func
-		new Function( 'module', 'exports', 'require', code )( moduleObj, moduleObj.exports,
+		new Function( 'module', 'require', 'window', 'with(window){' + code + '}' ).bind( mockWindow )(
+			moduleObj,
 			// eslint-disable-next-line no-use-before-define
-			makeRequireFunction( context, path )
+			makeRequireFunction( context, path ),
+			mockWindow
 		);
 		if ( parsedSFC !== null ) {
 			( moduleObj.exports as ComponentOptions<never> ).template = parsedSFC.template.content;
@@ -97,7 +149,7 @@ function executeFile( context : ModuleExecutionContext, path : string ) : Module
 	} else {
 		result = code;
 	}
-	context.exportsCache[ path ] = result;
+	context.fileExportsCache[ path ] = result;
 	return result;
 }
 
@@ -108,52 +160,137 @@ function makeRequireFunction( context : ModuleExecutionContext, path : string ) 
 			if ( fileName in builtinModules ) {
 				return builtinModules[ fileName ];
 			}
-			if ( hasOwn.call( context.modules, fileName ) ) {
+			if ( hasOwn.call( context.requestContext.modules, fileName ) ) {
 				// eslint-disable-next-line no-use-before-define
-				return executeModule( context.modules, fileName );
+				return executeModule( context.requestContext, fileName );
 			}
 			throw new Error( `Cannot require() undefined module ${fileName}` );
 		}
 		if ( !hasOwn.call( context.files, resolvedFileName ) ) {
 			throw new Error( `Cannot require() undefined file ${fileName}` );
 		}
-		if ( hasOwn.call( context.exportsCache, resolvedFileName ) ) {
-			return context.exportsCache[ resolvedFileName ];
+		if ( hasOwn.call( context.fileExportsCache, resolvedFileName ) ) {
+			return context.fileExportsCache[ resolvedFileName ];
 		}
 
 		return executeFile( context, resolvedFileName );
 	};
 }
 
-function executeModule( modules : Record<string, ModuleDefinition>, moduleName : string )
+function addMessages( messageMap: Map<string, string>, messages: string | Record<string, string> )
+: void {
+	const decodedMessages : Record<string, string> = typeof messages === 'string' ? JSON.parse( messages ) : messages;
+	for ( const [ k, v ] of Object.entries( decodedMessages ) ) {
+		messageMap.set( k, v );
+	}
+}
+
+function executeModule( requestContext : RequestExecutionContext, moduleName : string )
 : ModuleExport {
-	const { files, entry } = modules[ moduleName ];
-	const context : ModuleExecutionContext = {
-		files,
-		exportsCache: {},
-		modules
-	};
-	return executeFile( context, entry );
+	if ( !hasOwn.call( requestContext.moduleExportsCache, moduleName ) ) {
+		const { files, entry, messages = {}, dependencies = [] } =
+			requestContext.modules[ moduleName ];
+		for ( const dependency of dependencies ) {
+			executeModule( requestContext, dependency );
+		}
+		const context : ModuleExecutionContext = {
+			files,
+			fileExportsCache: {},
+			requestContext
+		};
+		addMessages( requestContext.messageMap, messages );
+		requestContext.moduleExportsCache[ moduleName ] = executeFile( context, entry );
+	}
+	return requestContext.moduleExportsCache[ moduleName ];
 }
 
 function wrapComponent(
 	wrappedComponent : ComponentOptions<never>,
 	props: Record<string, unknown>,
-	attrs: Record<string, unknown>
+	attrs: Record<string, unknown>,
+	mockWindow: { mw: MwI18n }
 ) : Vue {
-	return new Vue( {
+	// Expose the mockMw object through the _mw option, and access it in the i18n plugin
+	// This ensures that every rendering has its own message store, so that multiple renderings
+	// happening concurrently don't pollute a shared global message store
+	const Extended = Vue.extend( {
 		render: ( h ) => h( wrappedComponent, { props, attrs } )
-	} );
+	} ) as VueConstructor & { options?: { _mw: MwI18n } };
+	// eslint-disable-next-line no-underscore-dangle
+	Extended.options._mw = mockWindow.mw;
+	return new Extended();
 }
 
 server.use( express.json( { limit: '10MB' } ) );
 
 server.post( '/render', async ( req, res ) => {
-	const { modules, mainModule = 'main', props = {}, attrs = {} } = ( req.body as RequestData );
-	const componentObject = executeModule( modules, mainModule );
-	const app = wrapComponent( componentObject, props, attrs );
-	const context = {};
+	const {
+		modules,
+		lang,
+		mainModule = 'main',
+		exportProperty = null,
+		props = {},
+		attrs = {}
+	} = ( req.body as RequestData );
 
+	const messageMap = new Map<string, string>();
+
+	// HACK mock some things to make common code work
+	const mockLog = () : boolean => false;
+	mockLog.deprecate = () => false;
+	class MwMap {
+		values: Map<string, unknown>;
+		constructor() {
+			this.values = new Map();
+		}
+		get( key : string, fallback : unknown ) : unknown {
+			// TODO full implementation, maybe just use mediawiki.js itself
+			return this.values.has( key ) ?
+				this.values.get( key ) :
+				fallback;
+		}
+		set( key : string, value : unknown ) : void {
+			if ( typeof key === 'object' ) {
+				for ( const [ k, v ] of Object.entries( key ) ) {
+					this.values.set( k, v );
+				}
+			} else {
+				this.values.set( key, value );
+			}
+		}
+		exists( key : string ) : boolean {
+			return this.values.has( key );
+		}
+	}
+	const mock$ = () : boolean => false;
+	mock$.extend = Object.assign;
+	mock$.fn = {};
+	// TODO decide how much of mw we want to mock vs how much we use real MW files vs how much
+	// we just don't make available
+	const mockWindow = {
+		mw: {
+			...makeMwI18n( lang, messageMap ),
+			config: new MwMap(), // TODO fill with values
+			user: {
+				options: new MwMap(),
+				tokens: new MwMap()
+			},
+			log: mockLog,
+			Map: MwMap,
+			libs: {} // HACK
+		},
+		$: mock$
+	};
+	const requestContext : RequestExecutionContext = {
+		modules, messageMap, mockWindow,
+		moduleExportsCache: { ...builtinModules }
+	};
+
+	const mainExport = executeModule( requestContext, mainModule );
+	const componentObject = exportProperty === null ? mainExport : mainExport[ exportProperty ];
+	const app = wrapComponent( componentObject, props, attrs, mockWindow );
+
+	const context = {};
 	try {
 		const html = await renderer.renderToString( app, context );
 		res.json( {
