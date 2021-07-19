@@ -21,10 +21,12 @@ Send POST requests to http://localhost:8082/render with JSON in the body formatt
 				"filename.js": "...file contents...",
 				"filename.vue": "...file contents, can be an SFC or JavaScript..."
 			},
-			"entry": "App.vue" // entry point file for this module
+			"entry": "index.js" // entry point file for this module
 		}
 	},
+	"lang": "en", // Language code (required)
 	"mainModule": "foo", // defaults to "main" if omitted
+	"exportProperty": "App", // indicates the main component is exported as module.exports.App
 	"props": {
 		// Props to pass to the main component
 		"propname": "propvalue"
@@ -41,7 +43,10 @@ Files can `require()` other files in the same module by calling `require( './fil
 returns the `module.exports` value from that file. Files can also require other modules by calling
 `require( 'moduleName' )`, which returns the `module.exports` value from that module's main file.
 
-The main module must export a Vue component options object. The service renders that component,
+The main module must export a Vue component options object as its `module.exports` value.
+Alternatively, it may export an object where one of the values is a Vue component options object, in
+which case `"exportProperty"` should be set. For example, if the main module makes the Vue component available
+as `module.exports.Foo`, you should set `"exportProperty": "Foo"`. The service renders that component,
 passing in the props and attrs, and returns the rendered HTML wrapped in an object that looks like
 `{ "html": "<div ...>...</div>" }`.
 
