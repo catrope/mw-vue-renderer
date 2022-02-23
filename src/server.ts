@@ -1,7 +1,8 @@
-import Vue, { ComponentOptions, VueConstructor, VNodeDirective, VNode } from 'vue';
+import { createSSRApp, App, ComponentOptions, Plugin } from 'vue';
+import * as Vue from 'vue';
 import express from 'express';
-import { parseComponent, SFCDescriptor } from 'vue-template-compiler';
-import { createRenderer } from 'vue-server-renderer';
+import { parse, SFCParseResult } from 'vue/compiler-sfc';
+import { renderToString } from 'vue/server-renderer';
 import makeMwI18n, { MwI18n, MwMessage } from './mwMessage';
 
 type ModuleDefinition = {
@@ -20,7 +21,7 @@ type RequestData = {
 	attrs: Record<string, unknown>
 }
 
-type ModuleExport = ComponentOptions<never> | VueConstructor | Record<string, unknown>;
+type ModuleExport = ComponentOptions<never> | Record<string, unknown>;
 
 type RequestExecutionContext = {
 	modules: Record<string, ModuleDefinition>,
@@ -39,46 +40,40 @@ const builtinModules = {
 	vue: Vue
 };
 
-Vue.use( {
-	install( localVue ) {
-		localVue.prototype.$i18n = function ( key, ...parameters ) {
-			// The _mw option is attached in wrapComponent()
-			// eslint-disable-next-line no-underscore-dangle
-			return this.$root.$options._mw.message( key, ...parameters );
-		};
-	}
-} );
+function makeI18nPlugin( mwI18n: MwI18n ) : Plugin {
+	return {
+		install( app ) {
+			app.config.globalProperties.$i18n = function ( key, ...parameters ) {
+				return mwI18n.message( key, ...parameters );
+			};
 
-function i18nDirective( vnode : VNode, binding : VNodeDirective ) : void {
-	// eslint-disable-next-line no-underscore-dangle
-	const mw = ( vnode.context.$root as Vue & { $options: { _mw: MwI18n } } )
-		.$options._mw;
-	let message : MwMessage;
-	if ( Array.isArray( binding.value ) ) {
-		if ( binding.arg === undefined ) {
-			// v-i18n-html="[ ...params ]" (error)
-			throw new Error( 'v-i18n-html used with parameter array but without message key' );
+			app.directive( 'i18n-html', {
+				getSSRProps( binding ) {
+					let message : MwMessage;
+					if ( Array.isArray( binding.value ) ) {
+						if ( binding.arg === undefined ) {
+							// v-i18n-html="[ ...params ]" (error)
+							throw new Error( 'v-i18n-html used with parameter array but without message key' );
+						}
+						// v-i18n-html:messageKey="[ ...params ]"
+						message = mwI18n.message( binding.arg ).params( binding.value );
+					} else if ( binding.value instanceof mwI18n.Message ) {
+						// v-i18n-html="mw.message( '...' ).params( [ ... ] )"
+						message = binding.value;
+					} else {
+						// v-i18n-html:foo or v-i18n-html="'foo'"
+						message = mwI18n.message( binding.arg || binding.value );
+					}
+					return {
+						innerHTML: message
+					};
+				}
+			} );
 		}
-		// v-i18n-html:messageKey="[ ...params ]"
-		message = mw.message( binding.arg ).params( binding.value );
-	} else if ( binding.value instanceof mw.Message ) {
-		// v-i18n-html="mw.message( '...' ).params( [ ... ] )"
-		message = binding.value;
-	} else {
-		// v-i18n-html:foo or v-i18n-html="'foo'"
-		message = mw.message( binding.arg || binding.value );
-	}
-	vnode.data.domProps = {
-		innerHTML: message.parse()
 	};
 }
 
 const server = express();
-const renderer = createRenderer( {
-	directives: {
-		'i18n-html': i18nDirective
-	}
-} );
 const hasOwn = Object.prototype.hasOwnProperty;
 
 // resolveRelativePath was copied from resources/src/startup/mediawiki.js
@@ -126,24 +121,27 @@ function executeFile( context : ModuleExecutionContext, path : string ) : Module
 	let code = context.files[ path ];
 	let result : ModuleExport;
 	if ( typeof code === 'string' ) {
-		let parsedSFC : SFCDescriptor = null;
+		let parsedSFC : SFCParseResult = null;
 		// Allow .vue files that have already been transformed to JS
 		if ( path.endsWith( '.vue' ) && code.trim().startsWith( '<' ) ) {
-			parsedSFC = parseComponent( code );
-			code = parsedSFC.script.content;
+			parsedSFC = parse( code );
+			// TODO check parsedSFC.errors
+			code = parsedSFC.descriptor.script.content;
 		}
 
 		const moduleObj = { exports: {} };
 		const mockWindow = context.requestContext.mockWindow;
 		// eslint-disable-next-line no-new-func
-		new Function( 'module', 'require', 'window', 'with(window){' + code + '}' ).bind( mockWindow )(
+		new Function( 'module', 'exports', 'require', 'window', 'with(window){' + code + '}' ).bind( mockWindow )(
 			moduleObj,
+			moduleObj.exports,
 			// eslint-disable-next-line no-use-before-define
 			makeRequireFunction( context, path ),
 			mockWindow
 		);
 		if ( parsedSFC !== null ) {
-			( moduleObj.exports as ComponentOptions<never> ).template = parsedSFC.template.content;
+			( moduleObj.exports as ComponentOptions<never> ).template =
+				parsedSFC.descriptor.template.content;
 		}
 		result = moduleObj.exports;
 	} else {
@@ -204,21 +202,14 @@ function executeModule( requestContext : RequestExecutionContext, moduleName : s
 	return requestContext.moduleExportsCache[ moduleName ];
 }
 
-function wrapComponent(
-	wrappedComponent : ComponentOptions<never>,
+function makeApp(
+	component: ComponentOptions<never>,
 	props: Record<string, unknown>,
-	attrs: Record<string, unknown>,
-	mockWindow: { mw: MwI18n }
-) : Vue {
-	// Expose the mockMw object through the _mw option, and access it in the i18n plugin
-	// This ensures that every rendering has its own message store, so that multiple renderings
-	// happening concurrently don't pollute a shared global message store
-	const Extended = Vue.extend( {
-		render: ( h ) => h( wrappedComponent, { props, attrs } )
-	} ) as VueConstructor & { options?: { _mw: MwI18n } };
-	// eslint-disable-next-line no-underscore-dangle
-	Extended.options._mw = mockWindow.mw;
-	return new Extended();
+	mwI18n: MwI18n
+) : App {
+	const app = createSSRApp( component, props );
+	app.use( makeI18nPlugin( mwI18n ) );
+	return app;
 }
 
 server.use( express.json( { limit: '10MB' } ) );
@@ -229,11 +220,11 @@ server.post( '/render', async ( req, res ) => {
 		lang,
 		mainModule = 'main',
 		exportProperty = null,
-		props = {},
-		attrs = {}
+		props = {}
 	} = ( req.body as RequestData );
 
 	const messageMap = new Map<string, string>();
+	const mwI18n = makeMwI18n( lang, messageMap );
 
 	// HACK mock some things to make common code work
 	const mockLog = () : boolean => false;
@@ -269,7 +260,7 @@ server.post( '/render', async ( req, res ) => {
 	// we just don't make available
 	const mockWindow = {
 		mw: {
-			...makeMwI18n( lang, messageMap ),
+			...mwI18n,
 			config: new MwMap(), // TODO fill with values
 			user: {
 				options: new MwMap(),
@@ -288,11 +279,11 @@ server.post( '/render', async ( req, res ) => {
 
 	const mainExport = executeModule( requestContext, mainModule );
 	const componentObject = exportProperty === null ? mainExport : mainExport[ exportProperty ];
-	const app = wrapComponent( componentObject, props, attrs, mockWindow );
+	const app = makeApp( componentObject, props, mwI18n );
 
 	const context = {};
 	try {
-		const html = await renderer.renderToString( app, context );
+		const html = await renderToString( app, context );
 		res.json( {
 			html
 		} );
